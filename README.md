@@ -1,85 +1,230 @@
-# 🛒 Modern Node.js Shopping Cart
+# 🛒 Shopping Cart App — Deployed on Kubernetes via KOPS
 
-Welcome! This is a robust, full-stack shopping cart application. It uses **Node.js** and **Express** for the server, **MongoDB Atlas** for the database, and integrates **Stripe** for handling secure payments.
-
-![Checkout Process Preview](https://user-images.githubusercontent.com/28437795/124288418-d3633a80-db59-11eb-8ecd-f01dba239fb7.png)
+A Node.js shopping cart application deployed on a production-style Kubernetes cluster provisioned on AWS EC2 using KOPS. This project covers the full DevOps lifecycle: containerization, image registry, cluster provisioning, and application deployment.
 
 ---
 
-## 🌟 Key Features
-- **Browse Games**: A pre-loaded catalog of popular games with descriptions and prices.
-- **Dynamic Cart**: Real-time cart updates (add, remove, change quantities).
-- **Secure Payments**: Fully integrated with Stripe's test payment system.
-- **User Accounts**: Sign-up and login functionality with persistent order histories.
-- **Order Tracking**: Users can view all their past successful purchases.
+## 🏗️ Architecture
 
----
-
-## 📋 Quick Setup Guide
-
-### 1. Requirements
-*   **Node.js**: Installed on your machine.
-*   **MongoDB**: An Atlas Cluster or a Local MongoDB URI.
-*   **Stripe**: A free developer account for your `Secret` and `Publishable` keys.
-
-### 2. Configure Environment (`.env`)
-Create a file named `.env` in the root folder and fill in the following:
-
-```env
-PORT=3000
-MONGO_DB_URL=mongodb+srv://<user>:<password>@cluster.xyz.mongodb.net/shop
-STRIPE_SECRET_KEY=sk_test_your_secret_key_goes_here
 ```
-
-### 3. Set Your Stripe Public Key
-Open `public/javascripts/checkout.js` and update your public key:
-```javascript
-const stripePublishableTestKey = 'pk_test_your_public_key_here';
-```
-
-### 4. Install & Prepare
-Run these commands in your terminal:
-```bash
-# Install all required packages
-npm install
-
-# (Optional) Verify your MongoDB connection is correct
+Local Machine
+     │
+     │  docker build + push
+     ▼
+ DockerHub (sivyam/shopping-cart)
+     │
+     │  kubectl apply
+     ▼
+┌─────────────────────────────────────────┐
+│         Kubernetes Cluster (KOPS)        │
+│              on AWS EC2                  │
+│                                         │
+│  ┌──────────────────┐  ┌─────────────┐  │
+│  │ Pod:             │  │ Pod:        │  │
+│  │ shopping-cart    │◄─► mongo       │  │
+│  │ (port 3000)      │  │ (port 27017)│  │
+│  └────────┬─────────┘  └─────────────┘  │
+│           │                             │
+│  ┌────────▼─────────┐                   │
+│  │ Service:         │                   │
+│  │ NodePort / LB    │                   │
+│  │ (external access)│                   │
+│  └──────────────────┘                   │
+└─────────────────────────────────────────┘
+         │
+         ▼
+   Browser Access
+   http://<NODE-IP>:<NodePort>
 ```
 
 ---
 
-## 📦 How to Populate Data (Migration)
-This project doesn't have an admin panel for adding games yet. To add the initial product list to your database, run:
+## ✅ Prerequisites
 
-```bash
-npm run migration:write
-```
-*Note: This script uses Mongoose 8 and will automatically create the collections in your MongoDB Atlas.*
+| Tool | Purpose |
+|---|---|
+| Docker | Build and push container image |
+| DockerHub Account | Host the container image |
+| AWS CLI | Interact with AWS services |
+| KOPS | Provision Kubernetes cluster on EC2 |
+| kubectl | Deploy and manage Kubernetes resources |
+| S3 Bucket | KOPS state store |
 
 ---
 
-## 🚀 How to Start the Server
-To launch the website, use the following command:
+## 🚀 Step-by-Step Execution
+
+### Step 1 — Build & Push Docker Image to DockerHub
 
 ```bash
-npm start
+# Build the Docker image
+docker build -t sivyam/shopping-cart:v1 .
+
+# Login to DockerHub
+docker login
+
+# Push image to DockerHub
+docker push sivyam/shopping-cart:v1
 ```
-Once started, open your browser and go to:
-### **[http://localhost:3000](http://localhost:3000)**
+
+> ✅ Image is now available at: `docker.io/sivyam/shopping-cart:v1`
 
 ---
 
-## 🛠️ Tech Stack
-*   **Backend**: Node.js & Express.js
-*   **Database**: MongoDB (via Mongoose)
-*   **Frontend**: Handlebars Templating (`.hbs`)
-*   **Payments**: Stripe API
-*   **Styling**: Bootstrap 4
-*   **Security**: Passport.js for Authentication
+### Step 2 — Provision Kubernetes Cluster using KOPS on AWS EC2
+
+```bash
+# Export cluster name and S3 state store
+export NAME=mycluster.k8s.local
+export KOPS_STATE_STORE=s3://your-kops-state-bucket
+
+# Create S3 bucket for KOPS state (skip if already exists)
+aws s3api create-bucket \
+  --bucket your-kops-state-bucket \
+  --region ap-south-1 \
+  --create-bucket-configuration LocationConstraint=ap-south-1
+
+# Enable versioning on the bucket
+aws s3api put-bucket-versioning \
+  --bucket your-kops-state-bucket \
+  --versioning-configuration Status=Enabled
+
+# Create the cluster definition
+kops create cluster \
+  --name=$NAME \
+  --state=$KOPS_STATE_STORE \
+  --zones=ap-south-1a \
+  --node-count=2 \
+  --node-size=t3.medium \
+  --master-size=t3.medium \
+  --dns-zone=$NAME
+
+# Provision the cluster on AWS EC2
+kops update cluster --name=$NAME --yes --admin
+
+# Wait for cluster to become healthy (~10 minutes)
+kops validate cluster --wait 10m
+
+# Confirm nodes are up and ready
+kubectl get nodes
+```
 
 ---
 
-## 🔧 Troubleshooting
-- **Port already in use**: If port 3000 is busy, change the `PORT` in your `.env` file.
-- **MongoDB Connection Error**: Check your IP Whitelist in the MongoDB Atlas dashboard.
-- **Stripe Public Key Error**: Ensure `checkout.js` has your real `pk_test_...` key.
+### Step 3 — Fetch Image from DockerHub
+
+Kubernetes automatically pulls the image from DockerHub when the manifest is applied. To verify the image is reachable:
+
+```bash
+# Confirm image exists on DockerHub
+docker pull sivyam/shopping-cart:v1
+
+# After deployment, check image pull status on a pod
+kubectl describe pod shopping-cart-app | grep -i image
+```
+
+> Kubernetes pulls `sivyam/shopping-cart:v1` from DockerHub at deploy time — no manual pull needed on cluster nodes.
+
+---
+
+### Step 4 — Deploy the App on Kubernetes
+
+```bash
+# Deploy both app and MongoDB pods
+kubectl apply -f shopping-cart.yaml
+
+# Verify pods are running
+kubectl get pods
+
+# Check pod details if anything looks off
+kubectl describe pod shopping-cart-app
+kubectl describe pod mongo
+
+# Stream logs from the app pod
+kubectl logs -f shopping-cart-app
+```
+
+Expected output:
+
+```
+NAME                  READY   STATUS    RESTARTS   AGE
+shopping-cart-app     1/1     Running   0          1m
+mongo                 1/1     Running   0          1m
+```
+
+---
+
+### Step 5 — Access the Website via Kubernetes Service
+
+```bash
+# Forward the pod port to your local machine
+kubectl port-forward pod/shopping-cart-app 3000:3000
+```
+
+Open your browser and go to:
+
+```
+http://localhost:3000
+```
+
+> **Using a NodePort Service?** Access via `http://<EC2-Node-Public-IP>:<NodePort>`
+> **Using a LoadBalancer Service?** Get the external URL with `kubectl get svc`
+
+---
+
+## 🛠️ Useful Commands
+
+```bash
+# --- Pods & Services ---
+kubectl get pods                           # List all pods
+kubectl get svc                            # List all services
+kubectl describe pod <pod-name>            # Debug pod events and config
+kubectl logs -f <pod-name>                 # Live log stream
+kubectl exec -it <pod-name> -- /bin/bash   # Open shell inside pod
+kubectl delete -f shopping-cart.yaml       # Remove all deployed resources
+
+# --- KOPS Cluster ---
+kops validate cluster                      # Check cluster health
+kops get cluster                           # List existing clusters
+kops delete cluster --name=$NAME --yes     # Destroy cluster and EC2 instances
+```
+
+---
+
+## ⚠️ Tear Down — Avoid AWS Charges
+
+```bash
+# Always delete the cluster when not in use
+kops delete cluster --name=mycluster.k8s.local --yes
+```
+
+> KOPS provisions real EC2 instances — delete the cluster after use to stop billing.
+
+---
+
+## 🔐 Environment Variables
+
+| Variable | Description |
+|---|---|
+| `PORT` | Port the app listens on (`3000`) |
+| `MONGO_DB_URL` | MongoDB connection string |
+| `STRIPE_SECRET_KEY` | Stripe secret key |
+| `STRIPE_PUBLISHABLE_KEY` | Stripe publishable key |
+
+> ⚠️ Never commit `.env` to Git. Add it to `.gitignore`.
+> For production, use **Kubernetes Secrets** instead of hardcoding env vars in manifests.
+
+---
+
+## 👤 Author
+
+**Sivi** — Aspiring DevOps Engineer  
+DockerHub: [hub.docker.com/u/sivyam](https://hub.docker.com/repository/docker/sivyam/shopping-cart/tags)
+
+---
+
+## 🙏 Original Application Credit
+
+The Node.js shopping cart application used in this project was originally developed by **Ruslan Zharkov**. All credit for the application code belongs to the original author. This repository focuses solely on the DevOps implementation — containerization, CI/CD, and Kubernetes deployment — built on top of that foundation.
+
+Original repository: [github.com/ruslanzharkov/nodejs-shopping-cart](https://github.com/ruslanzharkov/nodejs-shopping-cart?tab=readme-ov-file)
